@@ -30,6 +30,14 @@ type mongoes struct {
 	cfg              *MongoesConfig
 }
 
+func NewMongoes(conf *MongoesConfig) EventStore {
+	return &mongoes{
+		in:  make(EventStream, 2),
+		out: make(EventStream, 2),
+		cfg: conf,
+	}
+}
+
 func (es *mongoes) Replay(lastEventID string) EventOutbound {
 	out := make(EventStream)
 
@@ -60,26 +68,6 @@ func (es *mongoes) Replay(lastEventID string) EventOutbound {
 	return out
 }
 
-func (es *mongoes) nextSequenceId() uint64 {
-	var result struct {
-		Counter uint64
-	}
-	col := es.session.DB("").C("sequences")
-	col.FindId("events").Apply(mgo.Change{
-		Update:    bson.M{"$inc": bson.M{"counter": 1}},
-		ReturnNew: true,
-	}, &result)
-	return result.Counter
-}
-
-func (es *mongoes) lastSequnceId() uint64 {
-	var result struct {
-		Counter uint64
-	}
-	es.session.DB("").C("sequences").FindId("events").One(&result)
-	return result.Counter
-}
-
 func (es *mongoes) Start() error {
 	if sess, err := mgo.Dial(es.cfg.MongoUri); err != nil {
 		return fmt.Errorf("cannot connect to mongodb, uri: %s - %s", es.cfg.MongoUri, err.Error())
@@ -103,17 +91,20 @@ func (es *mongoes) Start() error {
 		},
 	})
 
-	sessionCheckTimer := time.NewTicker(time.Second)
-	defer sessionCheckTimer.Stop()
-
 	go func() {
+		sessionCheckTimer := time.NewTicker(time.Second)
+		defer sessionCheckTimer.Stop()
+
 		for {
 			select {
 			case e := <-es.in:
-				es.session.DB("").C("events").Insert(mongoesEvent{
+				err := es.session.DB("").C("events").Insert(mongoesEvent{
 					Event:      e,
 					SequenceID: es.nextSequenceId(),
 				})
+				if err != nil {
+					log.Println(err)
+				}
 
 			case op := <-es.ctx.OpC:
 				var e mongoesEvent
@@ -147,18 +138,30 @@ func (es *mongoes) Stop() {
 	}
 }
 
-func NewMongoes(conf *MongoesConfig) EventStore {
-	return &mongoes{
-		in:  make(EventStream),
-		out: make(EventStream),
-		cfg: conf,
-	}
-}
-
 func (b *mongoes) Add() EventInbound {
 	return b.in
 }
 
 func (b *mongoes) Added() EventOutbound {
-	return b.in
+	return b.out
+}
+
+func (es *mongoes) nextSequenceId() uint64 {
+	var result struct {
+		Counter uint64
+	}
+	col := es.session.DB("").C("sequences")
+	col.FindId("events").Apply(mgo.Change{
+		Update:    bson.M{"$inc": bson.M{"counter": 1}},
+		ReturnNew: true,
+	}, &result)
+	return result.Counter
+}
+
+func (es *mongoes) lastSequnceId() uint64 {
+	var result struct {
+		Counter uint64
+	}
+	es.session.DB("").C("sequences").FindId("events").One(&result)
+	return result.Counter
 }
